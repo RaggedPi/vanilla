@@ -1,0 +1,14 @@
+RaggedPi Project
+Codename: Vanilla
+
+Automated Chicken Coop
+
+Features:
+- temperature/ humidity sensor
+- heat-lamp relay
+- exhaust fan relay
+- interior light relay
+- automatic door
+- light detection sensors
+- push button overrides
+- lcd display/ tft touch screen display

@@ -17,7 +17,7 @@
 #define LED              13     // LED pin
 #define DHT_PIN          8      // Digital pin
 #define DHT_F            true   // Use fahrenheit
-#define PHOTOCELL_PIN    A0     // Analog pin
+#define LDR_PIN    A1     // Analog pin
 #define HEAT_PIN         RELAY2 // Digital pin
 #define FAN_PIN          RELAY3 // Digital pin
 #define LIGHT_PIN        RELAY4 // Digital pin
@@ -53,8 +53,8 @@ enum Modes {
 };
 
 /* Variables */
-int photocellReading;
-int photocellReadingLevel;
+int LDRReading;
+int LDRReadingLevel;
 Modes state = MONITOR_MODE;
 bool override[4] = { 0, 0, 0, 0 };
 float tempC = 0.00;
@@ -65,7 +65,7 @@ double heatTempSetting = 0.00;
 double fanTempSetting = 0.00;
 long lastTempCheckTime = 0;
 long tempCheckDelay = 600000;
-long lastTwilightTime = 0;
+long twilightTime = 0;
 long twilightDelay = 300000;
 
 /**
@@ -157,6 +157,35 @@ void displayTemps() {
 }
 
 /**
+ * Read photocells
+ */
+void readLDR() { 
+    LDRReading = analogRead(LDR_PIN);
+  
+    // Set threshholds
+    if (LDRReading >= 0 && LDRReading <= 3)
+        LDRReadingLevel = '1';
+    else if (LDRReading  >= 4 && LDRReading <= 120)
+        LDRReadingLevel = '2';    
+    else if (LDRReading  >= 125 )
+        LDRReadingLevel = '3';    
+}
+
+/**
+ * Display photocells
+ */
+void displayLDR() {
+    Serial.print("LDR Sensor Reading: ");
+    Serial.println(LDRReading);
+    Serial.print("LDR Sensor Reading Level: ");
+    
+    if (1 == LDRReadingLevel)   Serial.println("Dark");    
+    else if (2 == LDRReadingLevel)  Serial.println("Twilight");
+    else if (3 == LDRReadingLevel)  Serial.println("Light");
+    else    Serial.println("error obtaining reading.");
+}
+
+/**
  * Setup
  */
 void setup() {
@@ -166,10 +195,10 @@ void setup() {
     pinMode(DHT_PIN, INPUT);
     pinMode(LED, OUTPUT);
     pinMode(CS, OUTPUT);
-    pinMode(PHOTOCELL_PIN, INPUT);
+    pinMode(LDR_PIN, INPUT);
     pinMode(SERVO_PIN, OUTPUT);
 
-    Serial.println("RaggedPi Project Codename Nutmeg Initializing...");
+    Serial.println("RaggedPi Project Codename Vanilla Initializing...");
     
     Serial.print("Initializing relays...");
     fanRelay.begin();
@@ -203,25 +232,25 @@ void loop() {
     displayTemps();
 
     // Heatlamp
-    if ((tempF < heatTempSetting) || override[HEAT])
-        heatlampRelay.on();
-    else heatlampRelay.off();
+    if ((tempF < heatTempSetting) || override[HEATLAMP])
+        heatRelay.on();
+    else heatRelay.off();
 
     // Exaust Fan
     if ((tempF >= fanTempSetting) || override[FAN])
         fanRelay.on();
     else fanRelay.off();
 
-    // Door/*
+    // Door
     /*
         0-3 dark
         4-120 twilight
         121+ light
      */
-    readPhotocells();
-    displayPhotocells();   
-    if (((4 <= photocellReadingLevel) && 
-        (120 >= photocellReading)) || 
+    readLDR();
+    displayLDR();   
+    if (((4 <= LDRReadingLevel) && 
+        (120 >= LDRReading)) || 
         override[DOOR]) {  // if dusk/ dawn or overridden
         if (-1 == twilightTime || override[DOOR]) { // if dawn or overridden
             doorServo.write(OPEN);
@@ -230,7 +259,7 @@ void loop() {
         } else if (twilightDelay > (millis() - twilightTime) || !override[DOOR]) { // if dusk and after timelimit
             doorServo.write(CLOSED);
         }
-    } else if (photocellReading < 4) { // if night
+    } else if (LDRReading < 4) { // if night
         twilightTime = 0; 
     }
 

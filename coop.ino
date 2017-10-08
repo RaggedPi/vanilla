@@ -9,6 +9,7 @@
 #include <Servo.h>              // Servo libraryu
 #include <DHT.h>                // Thermometer library
 #include <OneButton.h>          // OneButton library
+#include <XBee.h>
 
 /* Misc Constants */
 #define SDA              2      // SDA
@@ -17,7 +18,7 @@
 #define LED              13     // LED pin
 #define DHT_PIN          8      // Digital pin
 #define DHT_F            true   // Use fahrenheit
-#define LDR_PIN    A1     // Analog pin
+#define LDR_PIN          A1     // Analog pin
 #define HEAT_PIN         RELAY2 // Digital pin
 #define FAN_PIN          RELAY3 // Digital pin
 #define LIGHT_PIN        RELAY4 // Digital pin
@@ -33,17 +34,10 @@
 #define HEATLAMP         1
 #define FAN              2
 #define DOOR             3
-
-/* Objects */
-Relay fanRelay(FAN_PIN, LOW);
-Relay heatRelay(HEAT_PIN, LOW);
-Relay lightRelay(LIGHT_PIN, LOW);
-Servo doorServo;
-DHT dht(DHT_PIN, DHT11);
-OneButton doorBtn(DOOR_BTN_PIN, true);
-OneButton heatBtn(HEAT_BTN_PIN, true);
-OneButton lightBtn(LIGHT_BTN_PIN, true);
-OneButton fanBtn(FAN_BTN_PIN, true);
+// Xbee2
+#define XB_ADDR1 0x0013a200 // dummy address 
+#define XB_ADDR2 0x40682fa2 // change before using.
+#define SPACE Serial.print(' ')
 
 /* Enums */
 enum Modes {
@@ -59,7 +53,7 @@ Modes state = MONITOR_MODE;
 bool override[4] = { 0, 0, 0, 0 };
 float tempC = 0.00;
 float tempF = 0.00;
-int doorPos = 0;
+int angle = 0;
 double temperature;
 double heatTempSetting = 0.00;
 double fanTempSetting = 0.00;
@@ -67,13 +61,30 @@ long lastTempCheckTime = 0;
 long tempCheckDelay = 600000;
 long twilightTime = 0;
 long twilightDelay = 300000;
+uint8_t payload[] = {0};
+
+/* Objects */
+Relay fanRelay(FAN_PIN, LOW);
+Relay heatRelay(HEAT_PIN, LOW);
+Relay lightRelay(LIGHT_PIN, LOW);
+Servo doorServo;
+DHT dht(DHT_PIN, DHT11);
+OneButton doorBtn(DOOR_BTN_PIN, true);
+OneButton heatBtn(HEAT_BTN_PIN, true);
+OneButton lightBtn(LIGHT_BTN_PIN, true);
+OneButton fanBtn(FAN_BTN_PIN, true);
+XBee xbee = XBee();
+// SH + SL Address of receiving XBee
+XBeeAddress64 addr64 = XBeeAddress64(XB_ADDR1, XB_ADDR2);
+ZBTxRequest zbTx = ZBTxRequest(addr64, payload, sizeof(payload));
+ZBTxStatusResponse txStatus = ZBTxStatusResponse();
 
 /**
  * Toggle door
  */
 void toggleDoor() {
     // If closed, open
-    if (doorPos == CLOSED) { 
+    if (angle == CLOSED) { 
         Serial.println("Opening door.");
         doorServo.write(OPEN);
     } 
@@ -114,7 +125,7 @@ void overrideDoor() {
  * @param  Servo d
  */
 void openDoor(Servo d) {
-    for(int angle = 90; angle <= 180; angle++) {
+    for(angle = 90; angle <= 180; angle++) {
         d.write(angle);
     }
 }
@@ -124,7 +135,7 @@ void openDoor(Servo d) {
  * @param  Servo d
  */
 void closeDoor(Servo d) {
-    for(int angle = 180; angle > 90; angle--) {
+    for(angle = 180; angle > 90; angle--) {
         d.write(angle);
     }
 }
@@ -184,6 +195,42 @@ void displayLDR() {
     else if (3 == LDRReadingLevel)  Serial.println("Light");
     else    Serial.println("error obtaining reading.");
 }
+
+/**
+ * Build XBEE data
+ */
+void buildData() {
+    payload[0] = (uint8_t)tempF >> 8 & 0xff;        // temp
+    payload[1] = (uint8_t)tempF & 0xff;             // temp
+    payload[2] = (uint8_t)LDRReadingLevel & 0xff;   // light reading
+    payload[3] = (bool)(angle > 90) & 0xff;    // door status
+    payload[4] = (bool)lightRelay.isOn() & 0xff;   // interior light status
+    payload[5] = (bool)heatRelay.isOn() & 0xff;     // heat lamp status
+    payload[6] = (bool)fanRelay.isOn() & 0xff;      // exhaust fan status
+    payload[7] = (bool)override & 0xff;             // override status
+}
+
+/**
+ * Send XBEE data
+ */
+void sendData() {
+    xbee.send(zbTx);
+    if (xbee.readPacket(500)) {
+        if (xbee.getResponse().getApiId() == ZB_TX_STATUS_RESPONSE) {
+            xbee.getResponse().getZBTxStatusResponse(txStatus);
+            if (txStatus.getDeliveryStatus() == SUCCESS) {
+                // yay!
+            } else {
+                // boo.
+            }
+        }
+    } else if (xbee.getResponse().isError()) {
+        // error...error...error...
+    } else {
+        // ...?
+    }
+}
+
 
 /**
  * Setup

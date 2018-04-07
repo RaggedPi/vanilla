@@ -7,181 +7,191 @@
 #include <SoftwareSerial.h>     // Serial library
 #include <Relay.h>              // Relay library
 #include <Servo.h>              // Servo libraryu
-#include <DHT.h>                // Thermometer library
+#include <Wire.h>               // one wire library
+#include <Time.h>               // time library
+#include "DS3231/DS3231.h"      // rtc library
 #include <OneButton.h>          // OneButton library
 
-/* Misc Constants */
+/* Constants */
+// Misc
 #define SDA              2      // SDA
 #define SDL              3      // SDL
 #define CS               10     // Chipselect
 #define LED              13     // LED pin
-#define DHT_PIN          8      // Digital pin
-#define DHT_F            true   // Use fahrenheit
-#define LDR_PIN    A1     // Analog pin
+// Pins
+#define LDR_PIN          A1     // Analog pin
 #define HEAT_PIN         RELAY2 // Digital pin
 #define FAN_PIN          RELAY3 // Digital pin
 #define LIGHT_PIN        RELAY4 // Digital pin
 #define SERVO_PIN        12     // Digital pin
-#define SLEEP_TIME       90000  // ms
 #define LIGHT_BTN_PIN    9      // Digital pin
 #define HEAT_BTN_PIN     10     // Digital pin
 #define FAN_BTN_PIN      11     // Digital pin
 #define DOOR_BTN_PIN     13     // Digital pin
+// Delimiters
 #define OPEN             180    // Door open position
 #define CLOSED           0      // Door closed position
-#define LIGHT            0
-#define HEATLAMP         1
-#define FAN              2
-#define DOOR             3
-
-/* Objects */
-Relay fanRelay(FAN_PIN, LOW);
-Relay heatRelay(HEAT_PIN, LOW);
-Relay lightRelay(LIGHT_PIN, LOW);
-Servo doorServo;
-DHT dht(DHT_PIN, DHT11);
-OneButton doorBtn(DOOR_BTN_PIN, true);
-OneButton heatBtn(HEAT_BTN_PIN, true);
-OneButton lightBtn(LIGHT_BTN_PIN, true);
-OneButton fanBtn(FAN_BTN_PIN, true);
-
-/* Enums */
-enum Modes {
-    MONITOR_MODE,
-    SLEEP_MODE,
-    MANUAL_MODE
-};
+#define FAN              0      // delimiter
+#define HEATLAMP         1      // delimiter
+#define LIGHT            2      // delimiter
+#define DOOR             3      // delimiter
+#define C                0      // delimiter
+#define F                1      // delimiter
+#define CURRENT          0      // delimiter
+#define PREVIOUS         1      // delimiter
+// Settings
+#define DHT_F            true   // Use fahrenheit
+#define LDR_READ_WAIT    60000  // ms
 
 /* Variables */
-int LDRReading;
-int LDRReadingLevel;
-Modes state = MONITOR_MODE;
-bool override[4] = { 0, 0, 0, 0 };
-float tempC = 0.00;
-float tempF = 0.00;
-int doorPos = 0;
-double temperature;
-double heatTempSetting = 0.00;
-double fanTempSetting = 0.00;
-long lastTempCheckTime = 0;
-long tempCheckDelay = 600000;
-long twilightTime = 0;
-long twilightDelay = 300000;
+Relay relays[3] = {             // relays
+    Relay(FAN_PIN, true), 
+    Relay(HEAT_PIN, true), 
+    Relay(LIGHT_PIN, true) 
+};                
+Servo doorServo;                // servo
+OneButton buttons[4] = {        // buttons
+    OneButton(FAN_BTN_PIN, true),
+    OneButton(HEAT_BTN_PIN, true),
+    OneButton(LIGHT_BTN_PIN, true),
+    OneButton(DOOR_BTN_PIN, true)
+};
+RTClib rtc;                     // read time clock
+DateTime cTime;                 // current time
+DS3231 thermometer;             // thermometer
+int LDRReading[2];              // LDR sensor
+int LDRReadingLevel[2];         // LDR sensor level
+int doorPos = 0;                // door position
+bool override[4] = { 0, 0, 0, 0 }; // overrides
+float temp[2];                  // temperatures
+double tempSetting[2];          // temperature settings
+unsigned long lastLDRReadTime = 0; // ms
+unsigned long lastTempCheckTime = 0; // ms
 
+/* Utility Methods */
+/**
+ * Move door
+ * @param  int moveTo
+ */
+void moveDoor(int moveTo) {
+    doorServo.write(moveTo);
+    doorPos = moveTo;
+}
+/*
+    0-3 dark
+    4-120 twilight
+    121+ light
+ */
+/**
+ * Is dusk
+ * @return bool
+ */
+bool isDusk() {
+    if ((cTime.unixtime() - lastLDRReadTime) <= LDR_READ_WAIT)    readLDR();
+    return ((LDRReadingLevel[CURRENT] == 2) && (LDRReading[CURRENT] < LDRReading[PREVIOUS]));
+}
+/**
+ * Is dawn
+ * @return bool
+ */
+bool isDawn() {
+    if ((cTime.unixtime() - lastLDRReadTime) <= LDR_READ_WAIT)  readLDR();
+    return ((LDRReadingLevel[CURRENT] == 2) && (LDRReading[CURRENT] > LDRReading[PREVIOUS]));
+}
+/**
+ * Fahrenheit to celsius
+ * @param  float c
+ * @return float
+ */
+float fahrenheitToCelsius(float c) {
+    return c * 9 / 5 + 32;
+}
+
+/* Toggle Methods */
 /**
  * Toggle door
  */
 void toggleDoor() {
-    // If closed, open
-    if (doorPos == CLOSED) { 
-        Serial.println("Opening door.");
-        doorServo.write(OPEN);
-    } 
-    // else close
-    else { 
-        Serial.println("Closing door.");
-        doorServo.write(CLOSED);
-    }
+    if (doorPos == CLOSED)  moveDoor(OPEN);
+    else    moveDoor(CLOSED);
 }
-
 /**
- * Toggle door
+ * Toggle heat lamp
  */
 void toggleHeatLamp() {
-    // If closed, open
-    if (heatRelay.isOff()) { 
-        Serial.println("Heatlamp on.");
-        heatRelay.on();
-    } 
-    // else close
-    else { 
-        Serial.println("Heatlamp off.");
-        heatRelay.off();
-    }
+    if (relays[HEATLAMP].isOff())  relays[HEATLAMP].on();
+    else    relays[HEATLAMP].off();
 }
-
 /**
- * Override door functionality (hold door open/ closed indefinately)
+ * Toggle fan
  */
-void overrideDoor() {
-    ~override[DOOR];
-    Serial.println("Overriding door..");
-    toggleDoor();
+void toggleFan() {
+    if (relays[FAN].isOff())    relays[FAN].on();
+    else    relays[FAN].off();
 }
-
 /**
- * Open door
- * @param  Servo d
+ * Toggle light
  */
-void openDoor(Servo d) {
-    for(int angle = 90; angle <= 180; angle++) {
-        d.write(angle);
-    }
+void toggleLight() {
+    if (relays[LIGHT].isOff())  relays[LIGHT].on();
+    else relays[LIGHT].off();
 }
 
-/**
- * Close door
- * @param  Servo d
- */
-void closeDoor(Servo d) {
-    for(int angle = 180; angle > 90; angle--) {
-        d.write(angle);
-    }
-}
-
+/* Read Methods */
 /**
  * Read temperature
  */
 void readTemps() {
-    tempC = dht.readTemperature();
-    tempF = dht.readTemperature(true);
-    if (isnan(tempC)) {
-        Serial.println("[ERROR] Failed to read DHT sensor (C).");
-        tempC = 0.00;
-    } else if (isnan(tempF)) {
-        Serial.println("[ERROR] Failed to read DHT sensor (F).");
-        tempF = 32.00;
-    }
+    temp[C] = thermometer.getTemperature();
+    temp[F] = fahrenheitToCelsius(temp[C]);
+    if (isnan(temp[C])) temp[C] = 0.00;
+    else if (isnan(temp[F]))  temp[F] = 32.00;
+    lastTempCheckTime = cTime.unixtime();
 }
-
-/**
- * Display temps
- */
-void displayTemps() {
-    Serial.print("Temp: ");
-    Serial.print(tempC);
-    Serial.println("C\t");
-    Serial.print("Temp: ");
-    Serial.print(tempF);
-    Serial.println("F\t");
-}
-
 /**
  * Read photocells
  */
 void readLDR() { 
-    LDRReading = analogRead(LDR_PIN);
-  
-    // Set threshholds
-    if (LDRReading >= 0 && LDRReading <= 3)
-        LDRReadingLevel = '1';
-    else if (LDRReading  >= 4 && LDRReading <= 120)
-        LDRReadingLevel = '2';    
-    else if (LDRReading  >= 125 )
-        LDRReadingLevel = '3';    
+    LDRReading[PREVIOUS] = LDRReading[CURRENT];
+    LDRReading[CURRENT] = analogRead(LDR_PIN);
+    lastLDRReadTime = cTime.unixtime();
+    
+    LDRReadingLevel[PREVIOUS] = LDRReadingLevel[CURRENT];
+    if (LDRReading[CURRENT] >= 0 && LDRReading[CURRENT] <= 3)
+        LDRReadingLevel[CURRENT] = 1;
+    else if (LDRReading[CURRENT]  >= 4 && LDRReading[CURRENT] <= 120)
+        LDRReadingLevel[CURRENT] = 2;    
+    else if (LDRReading[CURRENT]  >= 125 )
+        LDRReadingLevel[CURRENT] = 3;    
 }
 
+/* Print Methods */
 /**
- * Display photocells
+ * Print temps
  */
-void displayLDR() {
+void printTemps(int CorF=3) {
+    if (C == CorF || 3 == CorF) {
+        Serial.print("Temp: ");
+        Serial.print(temp[C], 1);
+        Serial.println("C\t");
+    }
+    if (F == CorF || 3 == CorF) {
+        Serial.print("Temp: ");
+        Serial.print(temp[F], 1);
+        Serial.println("F\t");
+    }
+}
+/**
+ * Print photocells
+ */
+void printLDR() {
     Serial.print("LDR Sensor Reading: ");
-    Serial.println(LDRReading);
+    Serial.println(LDRReading[CURRENT], 1);
     Serial.print("LDR Sensor Reading Level: ");
     
-    if (1 == LDRReadingLevel)   Serial.println("Dark");    
-    else if (2 == LDRReadingLevel)  Serial.println("Twilight");
-    else if (3 == LDRReadingLevel)  Serial.println("Light");
+    if (1 == LDRReadingLevel[CURRENT])   Serial.println("Dark");    
+    else if (2 == LDRReadingLevel[CURRENT])  Serial.println("Twilight");
+    else if (3 == LDRReadingLevel[CURRENT])  Serial.println("Light");
     else    Serial.println("error obtaining reading.");
 }
 
@@ -192,7 +202,8 @@ void setup() {
     Serial.begin(9600);
     while (!Serial);
 
-    pinMode(DHT_PIN, INPUT);
+    Wire.begin();
+
     pinMode(LED, OUTPUT);
     pinMode(CS, OUTPUT);
     pinMode(LDR_PIN, INPUT);
@@ -200,68 +211,37 @@ void setup() {
 
     Serial.println("RaggedPi Project Codename Vanilla Initializing...");
     
-    Serial.print("Initializing relays...");
-    fanRelay.begin();
-    heatRelay.begin();
-    lightRelay.begin();
+    for (int x=0; x<sizeof(relays); x++)    relays[x].begin();
     delay(600);
-    Serial.println("[OK]");
-    Serial.print("Initializing dht...");
-    dht.begin();
-    delay(600);
-    Serial.println("[OK]");
-    Serial.print("Initializing buttons...");
-    doorBtn.attachClick(toggleDoor);
-    doorBtn.attachPress(overrideDoor);
-    heatBtn.attachClick(toggleHeatLamp);
-    delay(600);
-    Serial.println("[OK]");
-
-    /* Initialized ************************************************************/
-    Serial.println("System initialized.");
-    delay(600);
+    
+    buttons[DOOR].attachClick(toggleDoor);
+    buttons[LIGHT].attachClick(toggleLight);
+    buttons[HEATLAMP].attachClick(toggleHeatLamp);
+    buttons[FAN].attachClick(toggleFan);
+    delay(600);    
 }
-
+/**
+ * Loop
+ */
 void loop() {
-    doorBtn.tick();
-    heatBtn.tick();
-    lightBtn.tick();
-    fanBtn.tick();
+    cTime = now();
 
+    for (int x=0; x<sizeof(buttons); x++) buttons[x].tick();
+
+    // Get temperature
     readTemps();
-    displayTemps();
 
     // Heatlamp
-    if ((tempF < heatTempSetting) || override[HEATLAMP])
-        heatRelay.on();
-    else heatRelay.off();
+    if ((temp[F] < tempSetting[HEATLAMP]))  relays[HEATLAMP].on();
+    else relays[HEATLAMP].off();
 
     // Exaust Fan
-    if ((tempF >= fanTempSetting) || override[FAN])
-        fanRelay.on();
-    else fanRelay.off();
+    if ((temp[F] >= tempSetting[FAN]))  relays[FAN].on();
+    else relays[FAN].off();
 
     // Door
-    /*
-        0-3 dark
-        4-120 twilight
-        121+ light
-     */
-    readLDR();
-    displayLDR();   
-    if (((4 <= LDRReadingLevel) && 
-        (120 >= LDRReading)) || 
-        override[DOOR]) {  // if dusk/ dawn or overridden
-        if (-1 == twilightTime || override[DOOR]) { // if dawn or overridden
-            doorServo.write(OPEN);
-        } else if (0 == twilightTime) { // if dusk
-            twilightTime = millis(); 
-        } else if (twilightDelay > (millis() - twilightTime) || !override[DOOR]) { // if dusk and after timelimit
-            doorServo.write(CLOSED);
-        }
-    } else if (LDRReading < 4) { // if night
-        twilightTime = 0; 
-    }
+    if (isDawn())   moveDoor(OPEN);
+    if (isDusk())   moveDoor(CLOSED);
 
     delay(3000);
 }
